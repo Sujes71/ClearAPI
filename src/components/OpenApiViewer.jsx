@@ -34,7 +34,6 @@ function getDefaultValue(schema) {
 }
 
 function buildCurl({ method, path, op, server }) {
-  // Reemplazo {param} por :param para compatibilidad Insomnia/Postman
   let url = '';
   if (server) {
     url = server.replace(/\/$/, '') + '/' + path.replace(/^\//, '');
@@ -72,7 +71,6 @@ function groupEndpointsByTagOrPath(paths) {
     Object.entries(methods).forEach(([method, op]) => {
       let tags = op.tags && op.tags.length > 0 ? op.tags : null;
       if (!tags) {
-        // Agrupa por primer segmento de path si no hay tags
         const match = path.match(/^\/([^\/]+)/);
         tags = [match ? match[1] : 'default'];
       }
@@ -85,6 +83,106 @@ function groupEndpointsByTagOrPath(paths) {
   return groups;
 }
 
+function resolveRef(ref, components) {
+  if (!ref || !ref.startsWith('#/components/schemas/')) return null;
+  const name = ref.replace('#/components/schemas/', '');
+  return components.schemas && components.schemas[name] ? { name, schema: components.schemas[name] } : null;
+}
+
+function getResponseSchema(resp, components) {
+  if (!resp || !resp.content || !resp.content['application/json']) return null;
+  const schema = resp.content['application/json'].schema;
+  if (!schema) return null;
+  // $ref
+  if (schema.$ref) return resolveRef(schema.$ref, components);
+  // Array of $ref
+  if (schema.type === 'array' && schema.items && schema.items.$ref) return resolveRef(schema.items.$ref, components);
+  // Inline object with properties (even if type is missing)
+  if ((schema.type === 'object' || schema.properties) && typeof schema.properties === 'object') {
+    // Give it a synthetic name for modal context
+    return { name: 'InlineResponse', schema };
+  }
+  return null;
+}
+
+function getMandatoryFromSchema(schema) {
+  return schema && schema.required ? schema.required : [];
+}
+
+function SchemaViewer({ schema, mandatory, context }) {
+  if (!schema) return null;
+  // Always show table if object with properties, even for inline response schemas
+  if ((schema.type === 'object' || schema.properties) && typeof schema.properties === 'object') {
+    const mand = mandatory || [];
+    // Filter fields by context
+    const filteredEntries = Object.entries(schema.properties).filter(([k, v]) => {
+      if (context && context.toLowerCase().includes('request')) {
+        // Exclude readOnly fields in request
+        return !v.readOnly;
+      } else if (context && context.toLowerCase().includes('response')) {
+        // Exclude writeOnly fields in response
+        return !v.writeOnly;
+      }
+      return true;
+    });
+    return (
+      <div className="schema-viewer">
+        <table style={{width:'100%',borderCollapse:'collapse',marginBottom:8}}>
+          <thead>
+            <tr style={{borderBottom:'1.5px solid #586e75'}}>
+              <th style={{color:'#b58900',textAlign:'left',padding:'4px 8px'}}>Field</th>
+              <th style={{color:'#2aa198',textAlign:'left',padding:'4px 8px'}}>Type</th>
+              <th style={{color:'#93a1a1',textAlign:'left',padding:'4px 8px'}}>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredEntries.map(([k, v]) => (
+              <tr key={k} style={{borderBottom:'1px solid #073642'}}>
+                <td style={{padding:'4px 8px',fontWeight:'bold',color: mand.includes(k) ? '#fdf6e3' : '#fdf6e3', background: mand.includes(k) ? '#073642' : 'none'}}>
+                  {k} {mand.includes(k) && <span style={{color:'#dc322f',fontWeight:'bold',marginLeft:4}} title="Mandatory">*</span>}
+                </td>
+                <td style={{padding:'4px 8px',color:'#2aa198'}}>{v.type || (v.$ref ? 'object' : '')}</td>
+                <td style={{padding:'4px 8px',color:'#93a1a1'}}>{v.description || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {schema.description && <div style={{color:'#b58900',marginTop:8}}>{schema.description}</div>}
+      </div>
+    );
+  }
+  // Fallback: show as JSON
+  return <pre style={{background:'#002b36',color:'#93a1a1',padding:12,borderRadius:8,overflowX:'auto'}}>{JSON.stringify(schema, null, 2)}</pre>;
+}
+
+// Update SchemaModal to pass context
+function SchemaModal({ schema, name, onClose, context, mandatory }) {
+  if (!schema) return null;
+  return (
+    <div className="schema-modal-overlay" onClick={onClose} tabIndex={-1}>
+      <div className="schema-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="schema-modal-header">
+          <span className="schema-modal-title">{context}{name ? `: ${name}` : ''}</span>
+          <button className="schema-modal-close" onClick={onClose} aria-label="Close schema">×</button>
+        </div>
+        <SchemaViewer schema={schema} mandatory={mandatory} context={context} />
+      </div>
+      <style>{`
+        .schema-modal-overlay {
+          position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+          background: rgba(0,43,54,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center;
+        }
+        .schema-modal {
+          background: #073642; color: #eee8d5; border-radius: 12px; max-width: 600px; width: 95vw; max-height: 90vh; overflow: auto; box-shadow: 0 8px 32px #002b36cc; padding: 24px 28px 18px 28px;
+        }
+        .schema-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .schema-modal-title { font-size: 1.2em; color: #b58900; }
+        .schema-modal-close { background: none; border: none; color: #dc322f; font-size: 2em; cursor: pointer; line-height: 1; }
+      `}</style>
+    </div>
+  );
+}
+
 export default function OpenApiViewer({ openApi }) {
   const info = openApi.info || {};
   const paths = openApi.paths || {};
@@ -94,9 +192,12 @@ export default function OpenApiViewer({ openApi }) {
   const [openGroups, setOpenGroups] = useState(() => {
     const groups = groupEndpointsByTagOrPath(paths);
     const state = {};
-    Object.keys(groups).forEach(tag => { state[tag] = false; }); // colapsados por defecto
+    Object.keys(groups).forEach(tag => { state[tag] = false; });
     return state;
   });
+  const [modalSchema, setModalSchema] = useState(null);
+  const [modalContext, setModalContext] = useState('Schema');
+  const [modalMandatory, setModalMandatory] = useState([]);
 
   const handleCopy = (curl, id) => {
     navigator.clipboard.writeText(curl);
@@ -132,6 +233,32 @@ export default function OpenApiViewer({ openApi }) {
               {openGroups[tag] && endpoints.map(({path, method, op}, idx) => {
                 const curl = buildCurl({ method, path, op, server });
                 const id = `${method}-${path}`;
+                // Detect schema refs for requestBody and responses
+                let reqSchemaRef = null;
+                let reqMandatory = [];
+                if (op.requestBody && op.requestBody.content && op.requestBody.content['application/json'] && op.requestBody.content['application/json'].schema) {
+                  const schema = op.requestBody.content['application/json'].schema;
+                  if (schema.$ref) {
+                    reqSchemaRef = schema.$ref;
+                    const resolved = resolveRef(reqSchemaRef, components);
+                    reqMandatory = getMandatoryFromSchema(resolved && resolved.schema);
+                  } else if (schema.type === 'array' && schema.items && schema.items.$ref) {
+                    reqSchemaRef = schema.items.$ref;
+                    const resolved = resolveRef(reqSchemaRef, components);
+                    reqMandatory = getMandatoryFromSchema(resolved && resolved.schema);
+                  }
+                }
+                const resSchemaRefs = [];
+                if (op.responses) {
+                  Object.entries(op.responses).forEach(([code, resp]) => {
+                    if (/^2\d\d$/.test(code)) {
+                      const resolved = getResponseSchema(resp, components);
+                      if (resolved) {
+                        resSchemaRefs.push({ code, ...resolved, mandatory: getMandatoryFromSchema(resolved.schema) });
+                      }
+                    }
+                  });
+                }
                 return (
                   <div key={method+path+idx} className="endpoint-path">
                     <div style={{display:'flex',alignItems:'center',gap:8}}>
@@ -158,8 +285,7 @@ export default function OpenApiViewer({ openApi }) {
                           <ul>
                             {op.parameters.map(param => (
                               <li key={param.name}>
-                                <b>{param.name}</b> <i>({param.in})</i>
-                                {param.required && <span className="required"> mandatory</span>}
+                                <b>{param.name}</b>{param.required && <span style={{color:'#dc322f',fontWeight:'bold',marginLeft:4}} title="Mandatory">*</span>} <i>({param.in})</i>
                                 {param.description && <>: {param.description}</>}
                               </li>
                             ))}
@@ -169,17 +295,38 @@ export default function OpenApiViewer({ openApi }) {
                       {op.requestBody && (
                         <div className="endpoint-body">
                           <b>Body:</b> {op.requestBody.description || 'No description'}
+                          {reqSchemaRef && resolveRef(reqSchemaRef, components) && (
+                            <button className="schema-link-btn" onClick={() => { setModalSchema(resolveRef(reqSchemaRef, components)); setModalContext('Request Body Schema'); setModalMandatory(reqMandatory); }} style={{marginLeft:12,background:'none',border:'none',color:'#2aa198',cursor:'pointer',fontWeight:'bold'}}>View request schema</button>
+                          )}
                         </div>
                       )}
                       {op.responses && (
                         <div className="endpoint-responses">
                           <b>Responses:</b>
                           <ul>
-                            {Object.entries(op.responses).map(([code, resp]) => (
-                              <li key={code}>
-                                <b>{code}</b>: {resp.description || 'No description'}
-                              </li>
-                            ))}
+                            {Object.entries(op.responses).map(([code, resp]) => {
+                              const resSchema = resSchemaRefs.find(r => r.code === code);
+                              return (
+                                <li key={code}>
+                                  <b>{code}</b>: {resp.description || 'No description'}
+                                  {resSchema && resSchema.schema && (
+                                    <button
+                                      className="schema-link-btn"
+                                      onClick={() => {
+                                        // If the schema is inline, use the code as the name
+                                        const schemaName = resSchema.name === 'InlineResponse' ? code : resSchema.name;
+                                        setModalSchema({ ...resSchema, name: schemaName });
+                                        setModalContext('Response Body Schema');
+                                        setModalMandatory(resSchema.mandatory);
+                                      }}
+                                      style={{marginLeft:10,background:'none',border:'none',color:'#2aa198',cursor:'pointer',fontWeight:'bold'}}
+                                    >
+                                      View response schema
+                                    </button>
+                                  )}
+                                </li>
+                              );
+                            })}
                           </ul>
                         </div>
                       )}
@@ -192,17 +339,8 @@ export default function OpenApiViewer({ openApi }) {
         </div>
       </Section>
 
-      {components.schemas && (
-        <Section title="Schemas">
-          <div className="schemas-list">
-            {Object.entries(components.schemas).map(([name, schema]) => (
-              <div key={name} className="schema-block">
-                <div className="schema-title">{name}</div>
-                <pre className="schema-json">{JSON.stringify(schema, null, 2)}</pre>
-              </div>
-            ))}
-          </div>
-        </Section>
+      {modalSchema && (
+        <SchemaModal name={modalSchema.name} schema={modalSchema.schema} context={modalContext} mandatory={modalMandatory} onClose={() => setModalSchema(null)} />
       )}
       <style>{`
         .copy-curl-btn svg { transition: transform 0.1s; }
@@ -235,6 +373,7 @@ export default function OpenApiViewer({ openApi }) {
           border-radius: 10px 10px 0 0;
           background: #073642;
         }
+        .schema-link-btn:hover { text-decoration: underline; }
       `}</style>
     </div>
   );
