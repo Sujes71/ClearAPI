@@ -109,7 +109,8 @@ function getMandatoryFromSchema(schema) {
   return schema && schema.required ? schema.required : [];
 }
 
-function SchemaViewer({ schema, mandatory, context }) {
+function SchemaViewer({ schema, mandatory, context, components }) {
+  const [expanded, setExpanded] = useState({});
   if (!schema) return null;
   // Always show table if object with properties, even for inline response schemas
   if ((schema.type === 'object' || schema.properties) && typeof schema.properties === 'object') {
@@ -125,26 +126,81 @@ function SchemaViewer({ schema, mandatory, context }) {
       }
       return true;
     });
+    // Helper para saber si un campo es expandible
+    function isExpandable(v) {
+      if (v.$ref) return true;
+      if (v.type === 'object' && v.properties) return true;
+      if (v.type === 'array' && v.items && (v.items.$ref || v.items.type === 'object')) return true;
+      return false;
+    }
+    // Helper para obtener el esquema hijo
+    function getChildSchema(v) {
+      if (v.$ref) {
+        const resolved = resolveRef(v.$ref, components);
+        return resolved ? resolved.schema : null;
+      }
+      if (v.type === 'array' && v.items) {
+        if (v.items.$ref) {
+          const resolved = resolveRef(v.items.$ref, components);
+          return resolved ? resolved.schema : v.items;
+        }
+        if (v.items.type === 'object' && v.items.properties) return v.items;
+      }
+      if (v.type === 'object' && v.properties) return v;
+      return null;
+    }
     return (
       <div className="schema-viewer">
         <table style={{width:'100%',borderCollapse:'collapse',marginBottom:8}}>
           <thead>
             <tr style={{borderBottom:'1.5px solid #586e75'}}>
+              <th style={{color:'#b58900',textAlign:'left',padding:'4px 8px'}}></th>
               <th style={{color:'#b58900',textAlign:'left',padding:'4px 8px'}}>Field</th>
               <th style={{color:'#2aa198',textAlign:'left',padding:'4px 8px'}}>Type</th>
               <th style={{color:'#93a1a1',textAlign:'left',padding:'4px 8px'}}>Description</th>
             </tr>
           </thead>
           <tbody>
-            {filteredEntries.map(([k, v]) => (
-              <tr key={k} style={{borderBottom:'1px solid #073642'}}>
-                <td style={{padding:'4px 8px',fontWeight:'bold',color: mand.includes(k) ? '#fdf6e3' : '#fdf6e3', background: mand.includes(k) ? '#073642' : 'none'}}>
-                  {k} {mand.includes(k) && <span style={{color:'#dc322f',fontWeight:'bold',marginLeft:4}} title="Mandatory">*</span>}
-                </td>
-                <td style={{padding:'4px 8px',color:'#2aa198'}}>{v.type || (v.$ref ? 'object' : '')}</td>
-                <td style={{padding:'4px 8px',color:'#93a1a1'}}>{v.description || ''}</td>
-              </tr>
-            ))}
+            {filteredEntries.map(([k, v]) => {
+              const expandable = isExpandable(v);
+              const isOpen = expanded[k];
+              return (
+                <React.Fragment key={k}>
+                  <tr style={{borderBottom:'1px solid #073642'}}>
+                    <td style={{padding:'4px 0 4px 4px',width:28}}>
+                      {expandable && (
+                        <span
+                          style={{cursor:'pointer',display:'inline-flex',alignItems:'center'}}
+                          onClick={() => setExpanded(e => ({...e, [k]: !e[k]}))}
+                          aria-label={isOpen ? 'Collapse' : 'Expand'}
+                          tabIndex={0}
+                        >
+                          <svg style={{transform:isOpen?'rotate(90deg)':'rotate(0deg)',transition:'transform 0.15s'}} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2aa198" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                        </span>
+                      )}
+                    </td>
+                    <td style={{padding:'4px 8px',fontWeight:'bold',color: mand.includes(k) ? '#fdf6e3' : '#fdf6e3'}}>
+                      {k} {mand.includes(k) && <span style={{color:'#dc322f',fontWeight:'bold',marginLeft:4}} title="Mandatory">*</span>}
+                    </td>
+                    <td style={{padding:'4px 8px',color:'#2aa198'}}>{v.type || (v.$ref ? 'object' : '')}</td>
+                    <td style={{padding:'4px 8px',color:'#93a1a1'}}>{v.description || ''}</td>
+                  </tr>
+                  {expandable && isOpen && (
+                    <tr>
+                      <td></td>
+                      <td colSpan={3} style={{padding:'0 0 0 16px',background:'#002b36'}}>
+                        <SchemaViewer
+                          schema={getChildSchema(v)}
+                          mandatory={getMandatoryFromSchema(getChildSchema(v))}
+                          context={context}
+                          components={components}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
         {schema.description && <div style={{color:'#b58900',marginTop:8}}>{schema.description}</div>}
@@ -178,29 +234,38 @@ function getAIPromptValue(schema) {
 }
 
 // Update SchemaModal to pass context
-function SchemaModal({ schema, name, onClose, context, mandatory }) {
+function SchemaModal({ schema, name, onClose, context, mandatory, components }) {
   const [copied, setCopied] = React.useState(false);
-  // Generar ejemplo JSON filtrado según contexto y con valores tipo IA
+  // Generar ejemplo JSON filtrado según contexto y con valores tipo IA, recursivo
   function getFilteredAIPrompt(schema, context) {
-    function filterProps(obj, ctx) {
-      if (!obj || typeof obj !== 'object') return obj;
-      if (Array.isArray(obj)) return obj.map(item => filterProps(item, ctx));
-      if (obj.properties) {
-        const filtered = {};
-        Object.entries(obj.properties).forEach(([k, v]) => {
-          if (ctx && ctx.toLowerCase().includes('request')) {
-            if (!v.readOnly) filtered[k] = getAIPromptValue(v);
-          } else if (ctx && ctx.toLowerCase().includes('response')) {
-            if (!v.writeOnly) filtered[k] = getAIPromptValue(v);
-          } else {
-            filtered[k] = getAIPromptValue(v);
-          }
-        });
-        return filtered;
+    if (!schema) return undefined;
+    if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+    switch (schema.type) {
+      case 'string': return 'string';
+      case 'number':
+      case 'integer': return 0;
+      case 'boolean': return false;
+      case 'array': {
+        if (schema.items) return [getFilteredAIPrompt(schema.items, context)];
+        return [];
       }
-      return obj;
+      case 'object': {
+        const obj = {};
+        if (schema.properties) {
+          Object.entries(schema.properties).forEach(([k, v]) => {
+            if (context && context.toLowerCase().includes('request')) {
+              if (!v.readOnly) obj[k] = getFilteredAIPrompt(v, context);
+            } else if (context && context.toLowerCase().includes('response')) {
+              if (!v.writeOnly) obj[k] = getFilteredAIPrompt(v, context);
+            } else {
+              obj[k] = getFilteredAIPrompt(v, context);
+            }
+          });
+        }
+        return obj;
+      }
+      default: return 'string';
     }
-    return filterProps(schema, context);
   }
   const exampleJson = JSON.stringify(getFilteredAIPrompt(schema, context), null, 2);
   const handleCopyJson = () => {
@@ -227,7 +292,7 @@ function SchemaModal({ schema, name, onClose, context, mandatory }) {
             <button className="schema-modal-close" onClick={onClose} aria-label="Close schema">×</button>
           </div>
         </div>
-        <SchemaViewer schema={schema} mandatory={mandatory} context={context} />
+        <SchemaViewer schema={schema} mandatory={mandatory} context={context} components={components} />
       </div>
       <style>{`
         .schema-modal-overlay {
@@ -443,7 +508,7 @@ export default function OpenApiViewer({ openApi }) {
       </Section>
 
       {modalSchema && (
-        <SchemaModal name={modalSchema.name} schema={modalSchema.schema} context={modalContext} mandatory={modalMandatory} onClose={() => setModalSchema(null)} />
+        <SchemaModal name={modalSchema.name} schema={modalSchema.schema} context={modalContext} mandatory={modalMandatory} onClose={() => setModalSchema(null)} components={components} />
       )}
       <style>{`
         .copy-curl-btn svg { transition: transform 0.1s; }
