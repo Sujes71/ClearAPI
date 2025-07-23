@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 function Section({ title, children }) {
   return (
@@ -218,8 +218,8 @@ function SchemaModal({ schema, name, onClose, context, mandatory }) {
               className="copy-json-btn"
               onClick={handleCopyJson}
               style={{background:'none',border:'none',color:'#b58900',borderRadius:6,padding:'2px',fontWeight:'bold',cursor:'pointer',marginRight:8,position:'relative',top:2}}
-              title="Copy example JSON for AI class generation"
-              aria-label="Copy example JSON"
+              title="Copy JSON"
+              aria-label="Copy JSON"
             >
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b58900" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
               {copied && <span className="copied-tooltip" style={{left:'-70px',top:'-2px'}}>Copied!</span>}
@@ -277,6 +277,14 @@ export default function OpenApiViewer({ openApi }) {
   const [modalSchema, setModalSchema] = useState(null);
   const [modalContext, setModalContext] = useState('Schema');
   const [modalMandatory, setModalMandatory] = useState([]);
+
+  // Nuevo: resetear openGroups cada vez que cambie openApi
+  useEffect(() => {
+    const groups = groupEndpointsByTagOrPath(paths);
+    const state = {};
+    Object.keys(groups).forEach(tag => { state[tag] = false; });
+    setOpenGroups(state);
+  }, [openApi]);
 
   const handleCopy = (curl, id) => {
     navigator.clipboard.writeText(curl);
@@ -344,8 +352,8 @@ export default function OpenApiViewer({ openApi }) {
                       <div className="endpoint-title" style={{flex:1}}>{path}</div>
                       <button
                         className="copy-curl-btn"
-                        title="Copy curl command"
-                        aria-label="Copy curl command"
+                        title="Copy curl"
+                        aria-label="Copy curl"
                         onClick={() => handleCopy(curl, id)}
                         style={{background:'none', border:'none', cursor:'pointer', marginLeft:8, marginRight:8, position:'relative', top:2}}
                       >
@@ -359,17 +367,33 @@ export default function OpenApiViewer({ openApi }) {
                       <span style={{display:'block',marginTop:4}}></span>
                       {op.description && <div className="endpoint-desc">{op.description}</div>}
                       {op.parameters && op.parameters.length > 0 && (
-                        <div className="endpoint-params">
-                          <b>Parameters:</b>
-                          <ul>
-                            {op.parameters.map(param => (
-                              <li key={param.name}>
-                                <b>{param.name}</b>{param.required && <span style={{color:'#dc322f',fontWeight:'bold',marginLeft:4}} title="Mandatory">*</span>} <i>({param.in})</i>
-                                {param.description && <>: {param.description}</>}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
+                        <details style={{marginTop:8,marginBottom:8}}>
+                          <summary style={{color:'#b58900',fontWeight:'bold',cursor:'pointer'}}>Parameters</summary>
+                          <table className="params-table" style={{width:'100%',marginTop:8,background:'#073642',borderRadius:6,boxShadow:'0 2px 8px #002b3622',borderCollapse:'separate',borderSpacing:0}}>
+                            <thead>
+                              <tr style={{background:'#002b36'}}>
+                                <th style={{color:'#b58900',textAlign:'left',padding:'8px 10px',borderTopLeftRadius:6}}>Name</th>
+                                <th style={{color:'#b58900',textAlign:'left',padding:'8px 10px',fontFamily:'monospace'}}>Type</th>
+                                <th style={{color:'#b58900',textAlign:'left',padding:'8px 10px'}}>In</th>
+                                <th style={{color:'#b58900',textAlign:'left',padding:'8px 10px',minWidth:160,maxWidth:320}}>Description</th>
+                                <th style={{color:'#b58900',textAlign:'center',padding:'8px 10px',borderTopRightRadius:6,minWidth:60}}>Mandatory</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {op.parameters.map((param, idx) => (
+                                <tr key={idx} style={{borderBottom:'1px solid #073642'}}>
+                                  <td style={{padding:'8px 10px',fontWeight:'bold',textAlign:'left',verticalAlign:'top'}}>{param.name}</td>
+                                  <td style={{padding:'8px 10px',fontFamily:'monospace',textAlign:'left',verticalAlign:'top'}}>{param.schema?.type || param.type || '-'}</td>
+                                  <td style={{padding:'8px 10px',textAlign:'left',verticalAlign:'top'}}>{param.in}</td>
+                                  <td style={{padding:'8px 10px',textAlign:'left',verticalAlign:'top',minWidth:160,maxWidth:320,wordBreak:'break-word'}}>{param.description || '-'}</td>
+                                  <td style={{padding:'8px 10px',textAlign:'center',verticalAlign:'top',minWidth:60}}>
+                                    {param.required ? <span style={{color:'#dc322f',fontWeight:'bold',display:'inline-block',width:'100%'}} title="Mandatory">*</span> : ''}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </details>
                       )}
                       {op.requestBody && (
                         <div className="endpoint-body">
