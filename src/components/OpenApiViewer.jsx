@@ -155,15 +155,77 @@ function SchemaViewer({ schema, mandatory, context }) {
   return <pre style={{background:'#002b36',color:'#93a1a1',padding:12,borderRadius:8,overflowX:'auto'}}>{JSON.stringify(schema, null, 2)}</pre>;
 }
 
+function getAIPromptValue(schema) {
+  if (!schema) return undefined;
+  if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+  switch (schema.type) {
+    case 'string': return 'string';
+    case 'number':
+    case 'integer': return 0;
+    case 'boolean': return false;
+    case 'array': return [];
+    case 'object': {
+      const obj = {};
+      if (schema.properties) {
+        Object.entries(schema.properties).forEach(([k, v]) => {
+          obj[k] = getAIPromptValue(v);
+        });
+      }
+      return obj;
+    }
+    default: return 'string';
+  }
+}
+
 // Update SchemaModal to pass context
 function SchemaModal({ schema, name, onClose, context, mandatory }) {
-  if (!schema) return null;
+  const [copied, setCopied] = React.useState(false);
+  // Generar ejemplo JSON filtrado según contexto y con valores tipo IA
+  function getFilteredAIPrompt(schema, context) {
+    function filterProps(obj, ctx) {
+      if (!obj || typeof obj !== 'object') return obj;
+      if (Array.isArray(obj)) return obj.map(item => filterProps(item, ctx));
+      if (obj.properties) {
+        const filtered = {};
+        Object.entries(obj.properties).forEach(([k, v]) => {
+          if (ctx && ctx.toLowerCase().includes('request')) {
+            if (!v.readOnly) filtered[k] = getAIPromptValue(v);
+          } else if (ctx && ctx.toLowerCase().includes('response')) {
+            if (!v.writeOnly) filtered[k] = getAIPromptValue(v);
+          } else {
+            filtered[k] = getAIPromptValue(v);
+          }
+        });
+        return filtered;
+      }
+      return obj;
+    }
+    return filterProps(schema, context);
+  }
+  const exampleJson = JSON.stringify(getFilteredAIPrompt(schema, context), null, 2);
+  const handleCopyJson = () => {
+    navigator.clipboard.writeText(exampleJson);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
   return (
     <div className="schema-modal-overlay" onClick={onClose} tabIndex={-1}>
       <div className="schema-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
-        <div className="schema-modal-header">
+        <div className="schema-modal-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <span className="schema-modal-title">{context}{name ? `: ${name}` : ''}</span>
-          <button className="schema-modal-close" onClick={onClose} aria-label="Close schema">×</button>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <button
+              className="copy-json-btn"
+              onClick={handleCopyJson}
+              style={{background:'none',border:'none',color:'#b58900',borderRadius:6,padding:'2px',fontWeight:'bold',cursor:'pointer',marginRight:8,position:'relative',top:2}}
+              title="Copy example JSON for AI class generation"
+              aria-label="Copy example JSON"
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b58900" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+              {copied && <span className="copied-tooltip" style={{left:'-70px',top:'-2px'}}>Copied!</span>}
+            </button>
+            <button className="schema-modal-close" onClick={onClose} aria-label="Close schema">×</button>
+          </div>
         </div>
         <SchemaViewer schema={schema} mandatory={mandatory} context={context} />
       </div>
@@ -178,6 +240,23 @@ function SchemaModal({ schema, name, onClose, context, mandatory }) {
         .schema-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
         .schema-modal-title { font-size: 1.2em; color: #b58900; }
         .schema-modal-close { background: none; border: none; color: #dc322f; font-size: 2em; cursor: pointer; line-height: 1; }
+        .copy-json-btn:hover svg { filter: brightness(1.5); }
+        .copied-tooltip {
+          position: absolute;
+          right: unset;
+          left: -70px;
+          top: -2px;
+          background: #2aa198;
+          color: #002b36;
+          border-radius: 6px;
+          padding: 2px 10px;
+          font-size: 0.98em;
+          font-weight: bold;
+          box-shadow: 0 2px 8px #002b3622;
+          z-index: 10;
+          pointer-events: none;
+          opacity: 0.95;
+        }
       `}</style>
     </div>
   );
