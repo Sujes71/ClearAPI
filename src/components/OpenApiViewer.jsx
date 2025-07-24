@@ -214,21 +214,19 @@ function SchemaViewer({ schema, mandatory, context, components }) {
 function getAIPromptValue(schema) {
   if (!schema) return undefined;
   if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+  if ((schema.type === 'object' || schema.properties) && typeof schema.properties === 'object') {
+    const obj = {};
+    Object.entries(schema.properties).forEach(([k, v]) => {
+      obj[k] = getAIPromptValue(v);
+    });
+    return obj;
+  }
   switch (schema.type) {
     case 'string': return 'string';
-    case 'number':
-    case 'integer': return 0;
-    case 'boolean': return false;
+    case 'number': return 'number';
+    case 'integer': return 'integer';
+    case 'boolean': return 'boolean';
     case 'array': return [];
-    case 'object': {
-      const obj = {};
-      if (schema.properties) {
-        Object.entries(schema.properties).forEach(([k, v]) => {
-          obj[k] = getAIPromptValue(v);
-        });
-      }
-      return obj;
-    }
     default: return 'string';
   }
 }
@@ -240,29 +238,27 @@ function SchemaModal({ schema, name, onClose, context, mandatory, components }) 
   function getFilteredAIPrompt(schema, context) {
     if (!schema) return undefined;
     if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+    if ((schema.type === 'object' || schema.properties) && typeof schema.properties === 'object') {
+      const obj = {};
+      Object.entries(schema.properties).forEach(([k, v]) => {
+        if (context && context.toLowerCase().includes('request')) {
+          if (!v.readOnly) obj[k] = getFilteredAIPrompt(v, context);
+        } else if (context && context.toLowerCase().includes('response')) {
+          if (!v.writeOnly) obj[k] = getFilteredAIPrompt(v, context);
+        } else {
+          obj[k] = getFilteredAIPrompt(v, context);
+        }
+      });
+      return obj;
+    }
     switch (schema.type) {
       case 'string': return 'string';
-      case 'number':
-      case 'integer': return 0;
-      case 'boolean': return false;
+      case 'number': return 'number';
+      case 'integer': return 'integer';
+      case 'boolean': return 'boolean';
       case 'array': {
         if (schema.items) return [getFilteredAIPrompt(schema.items, context)];
         return [];
-      }
-      case 'object': {
-        const obj = {};
-        if (schema.properties) {
-          Object.entries(schema.properties).forEach(([k, v]) => {
-            if (context && context.toLowerCase().includes('request')) {
-              if (!v.readOnly) obj[k] = getFilteredAIPrompt(v, context);
-            } else if (context && context.toLowerCase().includes('response')) {
-              if (!v.writeOnly) obj[k] = getFilteredAIPrompt(v, context);
-            } else {
-              obj[k] = getFilteredAIPrompt(v, context);
-            }
-          });
-        }
-        return obj;
       }
       default: return 'string';
     }
@@ -342,6 +338,7 @@ export default function OpenApiViewer({ openApi }) {
   const [modalSchema, setModalSchema] = useState(null);
   const [modalContext, setModalContext] = useState('Schema');
   const [modalMandatory, setModalMandatory] = useState([]);
+  const [paramsOpenByOpId, setParamsOpenByOpId] = useState({}); // Estado por operación
 
   // Nuevo: resetear openGroups cada vez que cambie openApi
   useEffect(() => {
@@ -432,8 +429,39 @@ export default function OpenApiViewer({ openApi }) {
                       <span style={{display:'block',marginTop:4}}></span>
                       {op.description && <div className="endpoint-desc">{op.description}</div>}
                       {op.parameters && op.parameters.length > 0 && (
-                        <details style={{marginTop:8,marginBottom:8}}>
-                          <summary style={{color:'#b58900',fontWeight:'bold',cursor:'pointer'}}>Parameters</summary>
+                        <details
+                          style={{marginTop:8,marginBottom:8}}
+                          onToggle={e => setParamsOpenByOpId(prev => ({...prev, [op.operationId]: e.target.open}))}
+                          open={!!paramsOpenByOpId[op.operationId]}
+                        >
+                          <summary style={{color:'#b58900',fontWeight:'bold',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                            <span style={{display:'inline-flex',alignItems:'center'}}>
+                              <svg style={{marginRight:6,transition:'transform 0.15s',transform:paramsOpenByOpId[op.operationId]?'rotate(90deg)':'rotate(0deg)'}} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2aa198" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                              Parameters
+                            </span>
+                            <button
+                              className="copy-json-btn"
+                              onClick={e => {
+                                e.stopPropagation();
+                                const paramsJson = op.parameters.map(param => ({
+                                  name: param.name,
+                                  type: param.schema?.type || param.type || '-',
+                                  in: param.in,
+                                  description: param.description || '-',
+                                  mandatory: !!param.required
+                                }));
+                                navigator.clipboard.writeText(JSON.stringify(paramsJson, null, 2));
+                                setCopied('params-' + op.operationId);
+                                setTimeout(() => setCopied(null), 1200);
+                              }}
+                              style={{background:'none',border:'none',color:'#b58900',borderRadius:6,padding:'2px',fontWeight:'bold',cursor:'pointer',marginLeft:8,position:'relative',top:2,display:'inline-flex',alignItems:'center'}}
+                              title="Copy parameters"
+                              aria-label="Copy parameters"
+                            >
+                              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b58900" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+                              {copied === 'params-' + op.operationId && <span className="copied-tooltip" style={{left:'-70px',top:'-2px'}}>Copied!</span>}
+                            </button>
+                          </summary>
                           <table className="params-table" style={{width:'100%',marginTop:8,background:'#073642',borderRadius:6,boxShadow:'0 2px 8px #002b3622',borderCollapse:'separate',borderSpacing:0}}>
                             <thead>
                               <tr style={{background:'#002b36'}}>
